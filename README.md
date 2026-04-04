@@ -62,7 +62,9 @@ NOx(GT), PT08.S3(NOx), NO2(GT), PT08.S4(NO2), PT08.S5(O3), T, RH, AH
 | 6 | `T` (Temperature) | Training |
 | 7 | `NOx(GT)` | **Test only** (few-shot) |
 
-Outlier values (`-200`) are removed before processing.
+Outlier values (`-200`) are handled as follows:
+- **Human participant data (D_W):** `-200` entries are kept to simulate noisy/unreliable contributions. The min-max scaler is fitted on clean values only (excluding `-200`), and `-200` entries in D_W are replaced with `0.0` after normalization as a placeholder.
+- **UAV ground truth (D_U):** Any group whose UAV value is `-200` is skipped entirely, since reliable ground truth is required for training and evaluation.
 
 ---
 
