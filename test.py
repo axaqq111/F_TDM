@@ -15,6 +15,7 @@ Trust evaluation:
 from __future__ import annotations
 
 import argparse
+import copy
 
 import numpy as np
 import pandas as pd
@@ -27,9 +28,6 @@ from model import TrustAttentionTDM, TruthDiscoveryMLP
 from train import (
     ALPHA,
     HIDDEN,
-    adapted_forward_baseline,
-    adapted_forward_trust,
-    inner_update,
 )
 
 TRUST_CSV = "ground_truth_trust.csv"
@@ -53,36 +51,29 @@ def _rmse(pred: np.ndarray, true: np.ndarray) -> float:
     return float(np.sqrt(np.mean((pred - true) ** 2)))
 
 
-def _few_shot_adapt(
+def fine_tune_model(
     model,
     sup_x: torch.Tensor,
     sup_y: torch.Tensor,
-    alpha: float,
-    use_baseline: bool,
-) -> list[torch.Tensor]:
-    return inner_update(model, sup_x, sup_y, alpha, use_baseline)
+    n_steps: int = 20,
+    lr: float = ALPHA,
+) -> torch.nn.Module:
+    """Fine-tune a copy of the model on the support set with multiple gradient steps."""
+    ft_model = copy.deepcopy(model)
+    optimizer = torch.optim.SGD(ft_model.parameters(), lr=lr)
+    ft_model.train()
 
+    for _ in range(n_steps):
+        optimizer.zero_grad()
+        if isinstance(ft_model, TrustAttentionTDM):
+            pred, _ = ft_model(sup_x)
+        else:
+            pred = ft_model(sup_x)
+        loss = F.mse_loss(pred, sup_y)
+        loss.backward()
+        optimizer.step()
 
-def _predict(
-    adapted_params: list[torch.Tensor],
-    qry_x: torch.Tensor,
-    use_baseline: bool,
-) -> tuple[torch.Tensor, torch.Tensor | None]:
-    if use_baseline:
-        pred = adapted_forward_baseline(qry_x, adapted_params)
-        return pred, None
-    else:
-        pred = adapted_forward_trust(qry_x, adapted_params)
-        # Also get attention weights for trust evaluation
-        # Re-run attention module manually
-        (
-            attn_w0, attn_b0, attn_w1, attn_b1,
-            _mlp_w0, _mlp_b0, _mlp_w1, _mlp_b1,
-        ) = adapted_params
-        h = F.relu(F.linear(qry_x, attn_w0, attn_b0))
-        logits = F.linear(h, attn_w1, attn_b1)
-        weights = F.softmax(logits, dim=-1)
-        return pred, weights
+    return ft_model
 
 
 def _load_ground_truth_trust(nox_rows_idx: np.ndarray) -> np.ndarray | None:
@@ -194,11 +185,9 @@ def test(
         model = TrustAttentionTDM(n_workers=4, mlp_hidden=HIDDEN)
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.to(device)
-    model.train()  # keep in train mode for gradient computation
+    model.eval()
 
     print(f"[test] Loaded model from {model_path}")
-
-    rng = np.random.default_rng(seed)
 
     # ── Fig 4(a)-(e): vary test PoI counts per k ──────────────────────────────
     print("\n=== Fig 4(a)-(e): RMSE vs Number of Test PoIs ===")
@@ -211,19 +200,23 @@ def test(
                 print(f"  k={k}, test_n={test_n}: not enough data, skipping")
                 continue
 
-            # Sample indices
-            idx = rng.choice(n_total, size=needed, replace=False)
-            sup_idx = idx[:k]
-            qry_idx = idx[k:k + test_n]
+            # Sequential split: first k as support, next test_n as query
+            sup_idx = np.arange(k)
+            qry_idx = np.arange(k, k + test_n)
 
             sup_x = torch.tensor(X_all[sup_idx], dtype=torch.float32).to(device)
             sup_y = torch.tensor(y_all[sup_idx], dtype=torch.float32).to(device)
             qry_x = torch.tensor(X_all[qry_idx], dtype=torch.float32).to(device)
             qry_y = y_all[qry_idx]
 
-            adapted = _few_shot_adapt(model, sup_x, sup_y, alpha, use_baseline)
-            pred_norm, _ = _predict(adapted, qry_x, use_baseline)
-            pred_norm = pred_norm.detach().cpu().numpy()
+            ft_model = fine_tune_model(model, sup_x, sup_y, n_steps=20, lr=alpha)
+            ft_model.eval()
+            with torch.no_grad():
+                if isinstance(ft_model, TrustAttentionTDM):
+                    pred_norm, _ = ft_model(qry_x)
+                else:
+                    pred_norm = ft_model(qry_x)
+            pred_norm = pred_norm.cpu().numpy()
 
             rmse_norm = _rmse(pred_norm, qry_y)
             # Inverse-transform to original scale
@@ -243,18 +236,23 @@ def test(
             print(f"  k={k}: not enough data, skipping")
             continue
 
-        idx = rng.choice(n_total, size=needed, replace=False)
-        sup_idx = idx[:k]
-        qry_idx = idx[k:k + FIG4F_TEST_N]
+        # Sequential split
+        sup_idx = np.arange(k)
+        qry_idx = np.arange(k, k + FIG4F_TEST_N)
 
         sup_x = torch.tensor(X_all[sup_idx], dtype=torch.float32).to(device)
         sup_y = torch.tensor(y_all[sup_idx], dtype=torch.float32).to(device)
         qry_x = torch.tensor(X_all[qry_idx], dtype=torch.float32).to(device)
         qry_y_np = y_all[qry_idx]
 
-        adapted = _few_shot_adapt(model, sup_x, sup_y, alpha, use_baseline)
-        pred_norm, attn_weights_t = _predict(adapted, qry_x, use_baseline)
-        pred_norm_np = pred_norm.detach().cpu().numpy()
+        ft_model = fine_tune_model(model, sup_x, sup_y, n_steps=20, lr=alpha)
+        ft_model.eval()
+        with torch.no_grad():
+            if isinstance(ft_model, TrustAttentionTDM):
+                pred_norm, _ = ft_model(qry_x)
+            else:
+                pred_norm = ft_model(qry_x)
+        pred_norm_np = pred_norm.cpu().numpy()
 
         rmse_norm = _rmse(pred_norm_np, qry_y_np)
         pred_orig = nox_scaler.inverse_transform(pred_norm_np)
@@ -266,19 +264,20 @@ def test(
     # ── Trust evaluation (TrustAttentionTDM only) ─────────────────────────────
     if not use_baseline:
         print("\n=== Trust Mechanism Evaluation ===")
-        # Use a larger sample for reliable statistics
-        eval_n = min(200, n_total)
-        idx = rng.choice(n_total, size=eval_n + 10, replace=False)
-        sup_idx = idx[:10]
-        qry_idx = idx[10:10 + eval_n]
+        # Use up to 2000 samples for more reliable statistics
+        eval_n = min(2000, n_total - 10)
+        sup_idx = np.arange(10)
+        qry_idx = np.arange(10, 10 + eval_n)
 
         sup_x = torch.tensor(X_all[sup_idx], dtype=torch.float32).to(device)
         sup_y = torch.tensor(y_all[sup_idx], dtype=torch.float32).to(device)
         qry_x = torch.tensor(X_all[qry_idx], dtype=torch.float32).to(device)
 
-        adapted = _few_shot_adapt(model, sup_x, sup_y, alpha, use_baseline)
-        _, attn_weights_t = _predict(adapted, qry_x, use_baseline)
-        attn_np = attn_weights_t.detach().cpu().numpy()  # (eval_n, 4)
+        ft_model = fine_tune_model(model, sup_x, sup_y, n_steps=20, lr=alpha)
+        ft_model.eval()
+        with torch.no_grad():
+            _, attn_weights_t = ft_model(qry_x)
+        attn_np = attn_weights_t.cpu().numpy()  # (eval_n, 4)
 
         gt_trust = _load_ground_truth_trust(qry_idx)
         if gt_trust is not None:
@@ -299,6 +298,29 @@ def test(
                 )
         else:
             print("  ground_truth_trust.csv not found; skipping trust evaluation")
+
+        # Attention weight statistics for debugging
+        print(f"\n=== Attention Weight Statistics ===")
+        print(f"  Mean attention weight: {attn_np.mean():.4f}")
+        print(f"  Std attention weight: {attn_np.std():.4f}")
+        # Per-worker-type breakdown using worker_pool
+        try:
+            wp = pd.read_csv(worker_pool_path).set_index("worker_id")
+            wids_eval = wids_all[qry_idx]  # (eval_n, 4)
+            for level in ["trusted", "normal", "malicious"]:
+                level_weights = []
+                for i in range(len(wids_eval)):
+                    for j in range(4):
+                        wid = int(wids_eval[i, j])
+                        if wid in wp.index and wp.at[wid, "trust_level"] == level:
+                            level_weights.append(attn_np[i, j])
+                if level_weights:
+                    print(
+                        f"  {level}: mean_weight={np.mean(level_weights):.4f}  "
+                        f"(n={len(level_weights)})"
+                    )
+        except (FileNotFoundError, KeyError):
+            pass
 
 
 # ─── CLI ──────────────────────────────────────────────────────────────────────

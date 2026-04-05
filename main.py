@@ -36,6 +36,12 @@ def main() -> None:
     parser.add_argument("--mcs-path", type=str, default="AirQuality_MCS.csv")
     parser.add_argument("--model-path", type=str, default=None)
     parser.add_argument("--worker-pool-path", type=str, default="worker_pool.csv")
+    parser.add_argument(
+        "--trust-lambda",
+        type=float,
+        default=0.1,
+        help="Weight for trust auxiliary KL loss (0 to disable)",
+    )
     args = parser.parse_args()
 
     use_baseline = args.mode == "baseline"
@@ -71,6 +77,7 @@ def main() -> None:
         use_baseline=use_baseline,
         save_path=model_path,
         support_size=args.support_size,
+        trust_lambda=args.trust_lambda,
     )
 
     # ── Step 3: Evaluate on NOx ────────────────────────────────────────────────
