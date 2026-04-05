@@ -167,15 +167,20 @@ def train(
                 mse_loss = F.mse_loss(qry_pred, qry_y)
 
                 if trust_lambda > 0:
-                    # Compute attention weights from adapted params
+                    # Extract attention module params (indices 0-3):
+                    # attn_w0, attn_b0: first linear layer (4 -> attn_hidden)
+                    # attn_w1, attn_b1: second linear layer (attn_hidden -> 4)
                     attn_w0, attn_b0, attn_w1, attn_b1 = adapted_params[:4]
                     h = F.relu(F.linear(qry_x, attn_w0, attn_b0))
                     logits = F.linear(h, attn_w1, attn_b1)
                     attn_weights = F.softmax(logits, dim=-1)  # (batch, 4)
 
-                    # Target weights: workers closer to ground truth get higher weight
+                    # Target weights: workers closer to ground truth get higher weight.
+                    # The sharpening factor 10.0 creates clear contrast between worker
+                    # types (trusted/normal/malicious) given normalized errors ~0-1.
+                    SHARPENING = 10.0
                     errors = torch.abs(qry_x - qry_y)  # (batch, 4)
-                    target_weights = 1.0 / (1.0 + 10.0 * errors)
+                    target_weights = 1.0 / (1.0 + SHARPENING * errors)
                     target_weights = target_weights / target_weights.sum(dim=-1, keepdim=True)
 
                     trust_loss = F.kl_div(
