@@ -33,8 +33,8 @@ DATA_TYPES = [
 ]
 
 N_WORKERS_PER_POI = 4
-ANOMALY_MIN_DEVIATION = 0.3   # minimum deviation as fraction of data range
-ANOMALY_MAX_DEVIATION = 0.8   # maximum deviation as fraction of data range
+ANOMALY_MIN_DEVIATION = 0.15  # minimum deviation as fraction of data range
+ANOMALY_MAX_DEVIATION = 0.40  # maximum deviation as fraction of data range
 
 
 def _load_raw(path: str) -> pd.DataFrame:
@@ -67,8 +67,8 @@ def _build_worker_pool(rng: np.random.Generator) -> pd.DataFrame:
             {
                 "worker_id": wid,
                 "trust_level": "trusted",
-                "sigma_ratio": float(rng.uniform(0.02, 0.06)),
-                "outlier_prob": float(rng.uniform(0.00, 0.02)),
+                "sigma_ratio": float(rng.uniform(0.01, 0.03)),
+                "outlier_prob": float(rng.uniform(0.00, 0.01)),
             }
         )
 
@@ -78,8 +78,8 @@ def _build_worker_pool(rng: np.random.Generator) -> pd.DataFrame:
             {
                 "worker_id": wid,
                 "trust_level": "normal",
-                "sigma_ratio": float(rng.uniform(0.08, 0.18)),
-                "outlier_prob": float(rng.uniform(0.03, 0.10)),
+                "sigma_ratio": float(rng.uniform(0.03, 0.08)),
+                "outlier_prob": float(rng.uniform(0.01, 0.05)),
             }
         )
 
@@ -89,8 +89,8 @@ def _build_worker_pool(rng: np.random.Generator) -> pd.DataFrame:
             {
                 "worker_id": wid,
                 "trust_level": "malicious",
-                "sigma_ratio": float(rng.uniform(0.15, 0.35)),
-                "outlier_prob": float(rng.uniform(0.10, 0.30)),
+                "sigma_ratio": float(rng.uniform(0.08, 0.20)),
+                "outlier_prob": float(rng.uniform(0.05, 0.15)),
             }
         )
 
