@@ -55,15 +55,19 @@ def fine_tune_model(
     model,
     sup_x: torch.Tensor,
     sup_y: torch.Tensor,
-    n_steps: int = 20,
+    n_steps: int = 50,
     lr: float = ALPHA,
 ) -> torch.nn.Module:
     """Fine-tune a copy of the model on the support set with multiple gradient steps."""
     ft_model = copy.deepcopy(model)
-    optimizer = torch.optim.SGD(ft_model.parameters(), lr=lr)
+    optimizer = torch.optim.SGD(ft_model.parameters(), lr=lr * 2)  # initial lr (2x for warmup, reduced to lr after 10 steps)
     ft_model.train()
 
-    for _ in range(n_steps):
+    for step in range(n_steps):
+        if step == 10:
+            # Switch to normal lr after warmup
+            for pg in optimizer.param_groups:
+                pg["lr"] = lr
         optimizer.zero_grad()
         if isinstance(ft_model, TrustAttentionTDM):
             pred, _ = ft_model(sup_x)
@@ -167,7 +171,7 @@ def test(
     print(f"[test] Device: {device}")
 
     # ── Load data ─────────────────────────────────────────────────────────────
-    _, test_data, _, nox_scaler = load_and_preprocess(
+    _, _, test_data, _, nox_scaler = load_and_preprocess(
         mcs_path=mcs_path,
         seed=seed,
     )
@@ -209,7 +213,7 @@ def test(
             qry_x = torch.tensor(X_all[qry_idx], dtype=torch.float32).to(device)
             qry_y = y_all[qry_idx]
 
-            ft_model = fine_tune_model(model, sup_x, sup_y, n_steps=20, lr=alpha)
+            ft_model = fine_tune_model(model, sup_x, sup_y, n_steps=50, lr=alpha)
             ft_model.eval()
             with torch.no_grad():
                 if isinstance(ft_model, TrustAttentionTDM):
@@ -245,7 +249,7 @@ def test(
         qry_x = torch.tensor(X_all[qry_idx], dtype=torch.float32).to(device)
         qry_y_np = y_all[qry_idx]
 
-        ft_model = fine_tune_model(model, sup_x, sup_y, n_steps=20, lr=alpha)
+        ft_model = fine_tune_model(model, sup_x, sup_y, n_steps=50, lr=alpha)
         ft_model.eval()
         with torch.no_grad():
             if isinstance(ft_model, TrustAttentionTDM):
@@ -273,7 +277,7 @@ def test(
         sup_y = torch.tensor(y_all[sup_idx], dtype=torch.float32).to(device)
         qry_x = torch.tensor(X_all[qry_idx], dtype=torch.float32).to(device)
 
-        ft_model = fine_tune_model(model, sup_x, sup_y, n_steps=20, lr=alpha)
+        ft_model = fine_tune_model(model, sup_x, sup_y, n_steps=50, lr=alpha)
         ft_model.eval()
         with torch.no_grad():
             _, attn_weights_t = ft_model(qry_x)
