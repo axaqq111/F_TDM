@@ -33,6 +33,8 @@ DATA_TYPES = [
 ]
 
 N_WORKERS_PER_POI = 4
+ANOMALY_MIN_DEVIATION = 0.3   # minimum deviation as fraction of data range
+ANOMALY_MAX_DEVIATION = 0.8   # maximum deviation as fraction of data range
 
 
 def _load_raw(path: str) -> pd.DataFrame:
@@ -76,8 +78,8 @@ def _build_worker_pool(rng: np.random.Generator) -> pd.DataFrame:
             {
                 "worker_id": wid,
                 "trust_level": "normal",
-                "sigma_ratio": float(rng.uniform(0.10, 0.25)),
-                "outlier_prob": float(rng.uniform(0.05, 0.15)),
+                "sigma_ratio": float(rng.uniform(0.08, 0.18)),
+                "outlier_prob": float(rng.uniform(0.03, 0.10)),
             }
         )
 
@@ -87,8 +89,8 @@ def _build_worker_pool(rng: np.random.Generator) -> pd.DataFrame:
             {
                 "worker_id": wid,
                 "trust_level": "malicious",
-                "sigma_ratio": float(rng.uniform(0.30, 0.60)),
-                "outlier_prob": float(rng.uniform(0.20, 0.50)),
+                "sigma_ratio": float(rng.uniform(0.15, 0.35)),
+                "outlier_prob": float(rng.uniform(0.10, 0.30)),
             }
         )
 
@@ -104,10 +106,10 @@ def _generate_worker_value(
 ) -> float:
     """Generate one worker's reported value."""
     if rng.random() < outlier_prob:
-        # Anomalous value: large deviation, do NOT use -200
-        multiplier = rng.uniform(0.5, 2.0)
+        # Anomalous value: additive deviation bounded by data range
+        deviation = data_range * rng.uniform(ANOMALY_MIN_DEVIATION, ANOMALY_MAX_DEVIATION)
         sign = rng.choice([-1, 1])
-        return float(true_value * (1 + sign * multiplier))
+        return float(true_value + sign * deviation)
     else:
         noise = rng.normal(0, sigma)
         return float(true_value + noise)

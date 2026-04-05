@@ -24,7 +24,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
-from data_preprocessing import load_and_preprocess
+from data_preprocessing import load_and_preprocess, TRAIN_TYPES
 from model import TrustAttentionTDM, TruthDiscoveryMLP
 
 ALPHA = 0.0005   # inner-loop learning rate
@@ -53,11 +53,11 @@ def adapted_forward_trust(
     logits = F.linear(h, attn_w1, attn_b1)
     weights = F.softmax(logits, dim=-1)
 
-    # Weighted aggregation
-    d_agg = (weights * x).sum(dim=-1, keepdim=True)
+    # Element-wise weighted multiply (preserves all 4 dims)
+    d_weighted = weights * x
 
     # MLP
-    h2 = F.relu(F.linear(d_agg, mlp_w0, mlp_b0))
+    h2 = F.relu(F.linear(d_weighted, mlp_w0, mlp_b0))
     pred = F.linear(h2, mlp_w1, mlp_b1)
     return pred
 
@@ -120,12 +120,13 @@ def train(
 
     # ── Data ──────────────────────────────────────────────────────────────────
     print("[train] Loading data …")
-    train_tasks, _, _, _ = load_and_preprocess(
+    train_tasks_by_type, _, _, _ = load_and_preprocess(
         mcs_path=mcs_path,
         support_size=support_size,
         seed=seed,
     )
-    print(f"[train] {len(train_tasks)} meta-tasks loaded")
+    total_tasks = sum(len(v) for v in train_tasks_by_type.values())
+    print(f"[train] {total_tasks} meta-tasks loaded ({len(train_tasks_by_type)} types)")
 
     # ── Model ─────────────────────────────────────────────────────────────────
     if use_baseline:
@@ -139,34 +140,37 @@ def train(
     optimizer = optim.SGD(model.parameters(), lr=beta)
 
     # ── MAML training loop ────────────────────────────────────────────────────
-    rng = np.random.default_rng(seed)
     for epoch in range(1, epochs + 1):
-        # Sample a random task
-        task_idx = int(rng.integers(0, len(train_tasks)))
-        sup_x, sup_y, qry_x, qry_y = train_tasks[task_idx]
-
-        sup_x = torch.tensor(sup_x, dtype=torch.float32).to(device)
-        sup_y = torch.tensor(sup_y, dtype=torch.float32).to(device)
-        qry_x = torch.tensor(qry_x, dtype=torch.float32).to(device)
-        qry_y = torch.tensor(qry_y, dtype=torch.float32).to(device)
-
-        # Inner update
-        adapted_params = inner_update(model, sup_x, sup_y, alpha, use_baseline)
-
-        # Outer loss on query set with adapted params
-        if use_baseline:
-            qry_pred = adapted_forward_baseline(qry_x, adapted_params)
-        else:
-            qry_pred = adapted_forward_trust(qry_x, adapted_params)
-
-        outer_loss = F.mse_loss(qry_pred, qry_y)
-
         optimizer.zero_grad()
-        outer_loss.backward()
+        query_losses = []
+
+        # MAML Algorithm 1: iterate over all M data types per epoch
+        for dtype in TRAIN_TYPES:
+            task = random.choice(train_tasks_by_type[dtype])
+            sup_x, sup_y, qry_x, qry_y = task
+
+            sup_x = torch.tensor(sup_x, dtype=torch.float32).to(device)
+            sup_y = torch.tensor(sup_y, dtype=torch.float32).to(device)
+            qry_x = torch.tensor(qry_x, dtype=torch.float32).to(device)
+            qry_y = torch.tensor(qry_y, dtype=torch.float32).to(device)
+
+            # Inner update
+            adapted_params = inner_update(model, sup_x, sup_y, alpha, use_baseline)
+
+            # Outer loss on query set with adapted params
+            if use_baseline:
+                qry_pred = adapted_forward_baseline(qry_x, adapted_params)
+            else:
+                qry_pred = adapted_forward_trust(qry_x, adapted_params)
+
+            query_losses.append(F.mse_loss(qry_pred, qry_y))
+
+        L_sum = sum(query_losses)
+        L_sum.backward()
         optimizer.step()
 
         if epoch % 500 == 0 or epoch == 1:
-            print(f"[train] Epoch {epoch:5d}/{epochs}  outer_loss={outer_loss.item():.6f}")
+            print(f"[train] Epoch {epoch:5d}/{epochs}  outer_loss={L_sum.item():.6f}")
 
     # ── Save ──────────────────────────────────────────────────────────────────
     if save_path is None:

@@ -112,7 +112,7 @@ def build_tasks(
 def load_and_preprocess(
     mcs_path: str = MCS_CSV,
     support_size: int = SUPPORT_SIZE,
-    n_tasks: int = 100,
+    n_tasks: int = 500,
     seed: int = 42,
 ):
     """
@@ -120,7 +120,7 @@ def load_and_preprocess(
 
     Returns
     -------
-    train_tasks   : list of (sup_X, sup_y, qry_X, qry_y) for training
+    train_tasks_by_type : dict mapping data_type -> list of (sup_X, sup_y, qry_X, qry_y)
     test_data     : dict with keys 'X', 'y', 'worker_ids' for NOx test set
     scalers       : dict mapping data_type -> MinMaxScaler
     nox_scaler    : MinMaxScaler fitted on NOx true_value (for inverse transform)
@@ -129,7 +129,7 @@ def load_and_preprocess(
     df = _load_mcs(mcs_path)
 
     scalers = {}
-    train_tasks = []
+    train_tasks_by_type = {}
 
     # ── Training types ────────────────────────────────────────────────────────
     for dtype in TRAIN_TYPES:
@@ -137,7 +137,7 @@ def load_and_preprocess(
         scalers[dtype] = scaler
         df_type = _normalize_group(df[df["data_type"] == dtype].reset_index(drop=True), scaler)
         tasks = build_tasks(df_type, support_size=support_size, n_tasks=n_tasks, rng=rng)
-        train_tasks.extend(tasks)
+        train_tasks_by_type[dtype] = tasks
 
     # ── Test type (NOx) ───────────────────────────────────────────────────────
     nox_scaler = _fit_scaler(df, TEST_TYPE)
@@ -153,4 +153,4 @@ def load_and_preprocess(
         "worker_ids": test_wids,
     }
 
-    return train_tasks, test_data, scalers, nox_scaler
+    return train_tasks_by_type, test_data, scalers, nox_scaler
