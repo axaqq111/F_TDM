@@ -39,16 +39,16 @@ class TrustAttentionTDM(nn.Module):
          ↓
     AttentionModule → weights [a1,a2,a3,a4]
          ↓
-    Weighted sum d_agg = Σ aᵢ·dᵢ   (scalar per sample)
+    Element-wise multiply d_weighted = [a1·d1, a2·d2, a3·d3, a4·d4]
          ↓
-    MLP: 1 → 1024 → 1   (predicted true value)
+    MLP: 4 → 1024 → 1   (predicted true value)
     """
 
     def __init__(self, n_workers: int = 4, attn_hidden: int = 64, mlp_hidden: int = 1024):
         super().__init__()
         self.attention = AttentionModule(n_workers, attn_hidden)
         self.mlp = nn.Sequential(
-            nn.Linear(1, mlp_hidden),
+            nn.Linear(n_workers, mlp_hidden),
             nn.ReLU(),
             nn.Linear(mlp_hidden, 1),
         )
@@ -64,9 +64,9 @@ class TrustAttentionTDM(nn.Module):
         pred    : (batch, 1) — predicted true value
         weights : (batch, 4) — attention weights (trust proxy)
         """
-        weights = self.attention(x)              # (batch, 4)
-        d_agg = (weights * x).sum(dim=-1, keepdim=True)  # (batch, 1)
-        pred = self.mlp(d_agg)                   # (batch, 1)
+        weights = self.attention(x)          # (batch, 4)
+        d_weighted = weights * x             # (batch, 4) element-wise
+        pred = self.mlp(d_weighted)          # (batch, 1)
         return pred, weights
 
 
