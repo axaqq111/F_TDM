@@ -60,14 +60,10 @@ def fine_tune_model(
 ) -> torch.nn.Module:
     """Fine-tune a copy of the model on the support set with multiple gradient steps."""
     ft_model = copy.deepcopy(model)
-    optimizer = torch.optim.SGD(ft_model.parameters(), lr=lr * 2)  # initial lr (2x for warmup, reduced to lr after 10 steps)
+    optimizer = torch.optim.Adam(ft_model.parameters(), lr=lr)
     ft_model.train()
 
     for step in range(n_steps):
-        if step == 10:
-            # Switch to normal lr after warmup
-            for pg in optimizer.param_groups:
-                pg["lr"] = lr
         optimizer.zero_grad()
         if isinstance(ft_model, TrustAttentionTDM):
             pred, _ = ft_model(sup_x)

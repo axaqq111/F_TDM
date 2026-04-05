@@ -45,13 +45,14 @@ def adapted_forward_trust(
     Manual forward pass for TrustAttentionTDM with custom parameters.
 
     params order:
-      [attn_w0, attn_b0, attn_w1, attn_b1, mlp_w0, mlp_b0, mlp_w1, mlp_b1]
+      [attn_w0, attn_b0, attn_w1, attn_b1,
+       mlp_w0, mlp_b0, mlp_w1, mlp_b1, mlp_w2, mlp_b2]
 
     The MLP now takes concatenated [worker_values, trust_weights] (dim=8)
     instead of element-wise-weighted values (dim=4), preserving original
     observations while still incorporating trust signals.
     """
-    attn_w0, attn_b0, attn_w1, attn_b1, mlp_w0, mlp_b0, mlp_w1, mlp_b1 = params
+    attn_w0, attn_b0, attn_w1, attn_b1, mlp_w0, mlp_b0, mlp_w1, mlp_b1, mlp_w2, mlp_b2 = params
 
     # Attention module
     h = F.relu(F.linear(x, attn_w0, attn_b0))
@@ -61,9 +62,10 @@ def adapted_forward_trust(
     # Concatenate original worker values with trust weights (batch, 8)
     d_concat = torch.cat([x, weights], dim=-1)
 
-    # MLP (input dim = n_workers * 2 = 8)
+    # MLP (3 layers: 8 → mlp_hidden → 256 → 1)
     h2 = F.relu(F.linear(d_concat, mlp_w0, mlp_b0))
-    pred = F.linear(h2, mlp_w1, mlp_b1)
+    h3 = F.relu(F.linear(h2, mlp_w1, mlp_b1))
+    pred = F.linear(h3, mlp_w2, mlp_b2)
     return pred
 
 
@@ -89,19 +91,34 @@ def inner_update(
     sup_y: torch.Tensor,
     alpha: float,
     use_baseline: bool,
+    n_inner_steps: int = 3,
 ) -> list[torch.Tensor]:
-    """One gradient step on the support set; returns adapted parameters."""
+    """Multiple gradient steps on the support set; returns adapted parameters.
+
+    Parameters
+    ----------
+    model        : the meta-model whose parameters serve as the starting point
+    sup_x        : support set inputs  (support_size, input_dim)
+    sup_y        : support set targets (support_size, 1)
+    alpha        : inner-loop learning rate
+    use_baseline : if True, use TruthDiscoveryMLP forward; else TrustAttentionTDM
+    n_inner_steps: number of gradient steps to take on the support set.
+                   More steps yield better-adapted parameters at the cost of
+                   a deeper unrolled computation graph.
+    """
     params = list(model.parameters())
 
-    if use_baseline:
-        pred = adapted_forward_baseline(sup_x, params)
-    else:
-        pred = adapted_forward_trust(sup_x, params)
+    for _ in range(n_inner_steps):
+        if use_baseline:
+            pred = adapted_forward_baseline(sup_x, params)
+        else:
+            pred = adapted_forward_trust(sup_x, params)
 
-    loss = F.mse_loss(pred, sup_y)
-    grads = torch.autograd.grad(loss, params, create_graph=True)
-    adapted = [p - alpha * g for p, g in zip(params, grads)]
-    return adapted
+        loss = F.mse_loss(pred, sup_y)
+        grads = torch.autograd.grad(loss, params, create_graph=True)
+        params = [p - alpha * g for p, g in zip(params, grads)]
+
+    return params
 
 
 # ─── Training ─────────────────────────────────────────────────────────────────
@@ -115,7 +132,7 @@ def train(
     save_path: str | None = None,
     support_size: int = 10,
     seed: int = SEED,
-    trust_lambda: float = 10.0,
+    trust_lambda: float = 0.5,
 ) -> nn.Module:
     random.seed(seed)
     np.random.seed(seed)
@@ -230,7 +247,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--trust-lambda",
         type=float,
-        default=10.0,
+        default=0.5,
         help="Weight for trust auxiliary KL loss (0 to disable)",
     )
     args = parser.parse_args()
