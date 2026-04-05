@@ -27,11 +27,12 @@ import torch.optim as optim
 from data_preprocessing import load_and_preprocess, TRAIN_TYPES
 from model import TrustAttentionTDM, TruthDiscoveryMLP
 
-ALPHA = 0.0005   # inner-loop learning rate
-BETA = 0.0005    # outer-loop learning rate
+ALPHA = 0.0005       # inner-loop learning rate
+BETA = 0.0005        # outer-loop learning rate
 EPOCHS = 5000
 HIDDEN = 1024
 SEED = 42
+SHARPENING = 10.0    # controls contrast in trust target weights
 
 
 # ─── Adapted forward passes ───────────────────────────────────────────────────
@@ -121,7 +122,7 @@ def train(
 
     # ── Data ──────────────────────────────────────────────────────────────────
     print("[train] Loading data …")
-    train_tasks_by_type, _, _, _, _ = load_and_preprocess(
+    train_tasks_by_type, all_tasks_flat, _, _, _ = load_and_preprocess(
         mcs_path=mcs_path,
         support_size=support_size,
         seed=seed,
@@ -158,41 +159,39 @@ def train(
             # Inner update
             adapted_params = inner_update(model, sup_x, sup_y, alpha, use_baseline)
 
-            # Outer loss on query set with adapted params
+            # Outer loss on query set with adapted params (MSE only)
             if use_baseline:
                 qry_pred = adapted_forward_baseline(qry_x, adapted_params)
-                total_query_loss = F.mse_loss(qry_pred, qry_y)
             else:
                 qry_pred = adapted_forward_trust(qry_x, adapted_params)
-                mse_loss = F.mse_loss(qry_pred, qry_y)
 
-                if trust_lambda > 0:
-                    # Extract attention module params (indices 0-3):
-                    # attn_w0, attn_b0: first linear layer (4 -> attn_hidden)
-                    # attn_w1, attn_b1: second linear layer (attn_hidden -> 4)
-                    attn_w0, attn_b0, attn_w1, attn_b1 = adapted_params[:4]
-                    h = F.relu(F.linear(qry_x, attn_w0, attn_b0))
-                    logits = F.linear(h, attn_w1, attn_b1)
-                    attn_weights = F.softmax(logits, dim=-1)  # (batch, 4)
+            query_losses.append(F.mse_loss(qry_pred, qry_y))
 
-                    # Target weights: workers closer to ground truth get higher weight.
-                    # The sharpening factor 10.0 creates clear contrast between worker
-                    # types (trusted/normal/malicious) given normalized errors ~0-1.
-                    SHARPENING = 10.0
-                    errors = torch.abs(qry_x - qry_y)  # (batch, 4)
-                    target_weights = 1.0 / (1.0 + SHARPENING * errors)
-                    target_weights = target_weights / target_weights.sum(dim=-1, keepdim=True)
+        maml_loss = sum(query_losses)
 
-                    trust_loss = F.kl_div(
-                        (attn_weights + 1e-8).log(), target_weights, reduction="batchmean"
-                    )
-                    total_query_loss = mse_loss + trust_lambda * trust_loss
-                else:
-                    total_query_loss = mse_loss
+        # === Direct attention supervision (non-MAML, original params) ===
+        # Gradient flows directly to the attention module without traversing
+        # the inner-loop computation graph, making it far more effective.
+        trust_loss = torch.tensor(0.0, device=device)
+        if not use_baseline and trust_lambda > 0:
+            task = random.choice(all_tasks_flat)
+            batch_x, batch_y, _, _ = task
+            batch_x = torch.tensor(batch_x, dtype=torch.float32).to(device)
+            batch_y = torch.tensor(batch_y, dtype=torch.float32).to(device)
 
-            query_losses.append(total_query_loss)
+            # Forward through model's original parameters (not adapted)
+            _, attn_weights = model(batch_x)
 
-        L_sum = sum(query_losses)
+            # Target weights: workers closer to ground truth get higher weight
+            errors = torch.abs(batch_x - batch_y)  # (batch, 4)
+            target_weights = 1.0 / (1.0 + SHARPENING * errors)
+            target_weights = target_weights / target_weights.sum(dim=-1, keepdim=True)
+
+            trust_loss = F.kl_div(
+                (attn_weights + 1e-8).log(), target_weights, reduction="batchmean"
+            )
+
+        L_sum = maml_loss + trust_lambda * trust_loss
         L_sum.backward()
         optimizer.step()
 
