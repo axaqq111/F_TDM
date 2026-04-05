@@ -113,11 +113,11 @@ Input: [d1, d2, d3, d4]  (4 worker observations)
    │  → [a1, a2, a3, a4] │  ← learned trust weights
    └────────┬────────────┘
             ↓
-   Weighted sum: d_agg = Σ aᵢ·dᵢ  (scalar)
+   Concatenate: d_concat = [d1, d2, d3, d4, a1, a2, a3, a4]  (dim=8)
             ↓
    ┌─────────────────────┐
    │  MLP Regression     │
-   │  Linear(1 → 1024)   │
+   │  Linear(8 → 1024)   │
    │  ReLU               │
    │  Linear(1024 → 1)   │
    │  → predicted value  │

@@ -39,7 +39,7 @@ def main() -> None:
     parser.add_argument(
         "--trust-lambda",
         type=float,
-        default=1.0,
+        default=10.0,
         help="Weight for trust auxiliary KL loss (0 to disable)",
     )
     args = parser.parse_args()

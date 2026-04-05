@@ -46,6 +46,10 @@ def adapted_forward_trust(
 
     params order:
       [attn_w0, attn_b0, attn_w1, attn_b1, mlp_w0, mlp_b0, mlp_w1, mlp_b1]
+
+    The MLP now takes concatenated [worker_values, trust_weights] (dim=8)
+    instead of element-wise-weighted values (dim=4), preserving original
+    observations while still incorporating trust signals.
     """
     attn_w0, attn_b0, attn_w1, attn_b1, mlp_w0, mlp_b0, mlp_w1, mlp_b1 = params
 
@@ -54,11 +58,11 @@ def adapted_forward_trust(
     logits = F.linear(h, attn_w1, attn_b1)
     weights = F.softmax(logits, dim=-1)
 
-    # Element-wise weighted multiply (preserves all 4 dims)
-    d_weighted = weights * x
+    # Concatenate original worker values with trust weights (batch, 8)
+    d_concat = torch.cat([x, weights], dim=-1)
 
-    # MLP
-    h2 = F.relu(F.linear(d_weighted, mlp_w0, mlp_b0))
+    # MLP (input dim = n_workers * 2 = 8)
+    h2 = F.relu(F.linear(d_concat, mlp_w0, mlp_b0))
     pred = F.linear(h2, mlp_w1, mlp_b1)
     return pred
 
