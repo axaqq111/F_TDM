@@ -60,7 +60,7 @@ def fine_tune_model(
 ) -> torch.nn.Module:
     """Fine-tune a copy of the model on the support set with multiple gradient steps."""
     ft_model = copy.deepcopy(model)
-    optimizer = torch.optim.SGD(ft_model.parameters(), lr=lr * 2)  # warmup lr
+    optimizer = torch.optim.SGD(ft_model.parameters(), lr=lr * 2)  # initial lr (2x for warmup, reduced to lr after 10 steps)
     ft_model.train()
 
     for step in range(n_steps):

@@ -189,6 +189,8 @@ def train(
             batch_y = torch.tensor(batch_y, dtype=torch.float32).to(device)
 
             # Sharpen target weights: 1/(1 + 10*error) creates strong contrast
+            # batch_x: (batch, 4) worker observations; batch_y: (batch, 1) ground truth
+            # Subtracting broadcasts batch_y over 4 workers, giving per-worker errors
             errors = torch.abs(batch_x - batch_y)           # (batch, 4)
             target_weights = 1.0 / (1.0 + 10.0 * errors)   # 10x sharpening
             target_weights = target_weights / target_weights.sum(dim=-1, keepdim=True)
