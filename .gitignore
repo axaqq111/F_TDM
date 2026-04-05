@@ -1,0 +1,17 @@
+# Generated dataset files (regenerate with: python generate_dataset.py)
+AirQuality_MCS.csv
+ground_truth_trust.csv
+
+# Trained model checkpoints
+*.pth
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
