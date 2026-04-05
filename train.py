@@ -111,7 +111,7 @@ def train(
     save_path: str | None = None,
     support_size: int = 10,
     seed: int = SEED,
-    trust_lambda: float = 1.0,
+    trust_lambda: float = 10.0,
 ) -> nn.Module:
     random.seed(seed)
     np.random.seed(seed)
@@ -139,7 +139,7 @@ def train(
         model_name = "TrustAttentionTDM"
     print(f"[train] Model: {model_name}")
 
-    optimizer = optim.SGD(model.parameters(), lr=beta)
+    optimizer = optim.Adam(model.parameters(), lr=beta)
 
     # ── MAML training loop ────────────────────────────────────────────────────
     for epoch in range(1, epochs + 1):
@@ -226,7 +226,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--trust-lambda",
         type=float,
-        default=1.0,
+        default=10.0,
         help="Weight for trust auxiliary KL loss (0 to disable)",
     )
     args = parser.parse_args()
