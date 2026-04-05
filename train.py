@@ -110,6 +110,7 @@ def train(
     save_path: str | None = None,
     support_size: int = 10,
     seed: int = SEED,
+    trust_lambda: float = 0.1,
 ) -> nn.Module:
     random.seed(seed)
     np.random.seed(seed)
@@ -160,10 +161,28 @@ def train(
             # Outer loss on query set with adapted params
             if use_baseline:
                 qry_pred = adapted_forward_baseline(qry_x, adapted_params)
+                total_query_loss = F.mse_loss(qry_pred, qry_y)
             else:
                 qry_pred = adapted_forward_trust(qry_x, adapted_params)
+                mse_loss = F.mse_loss(qry_pred, qry_y)
 
-            query_losses.append(F.mse_loss(qry_pred, qry_y))
+                # Trust-aware auxiliary loss: encourage attention to assign higher
+                # weight to workers whose values are closer to the ground truth.
+                attn_w0, attn_b0, attn_w1, attn_b1 = adapted_params[:4]
+                h = F.relu(F.linear(qry_x, attn_w0, attn_b0))
+                logits = F.linear(h, attn_w1, attn_b1)
+                attn_weights = F.softmax(logits, dim=-1)  # (batch, 4)
+
+                errors = torch.abs(qry_x - qry_y)  # (batch, 4)
+                target_weights = 1.0 / (1.0 + errors)  # lower error → higher weight
+                target_weights = target_weights / target_weights.sum(dim=-1, keepdim=True)
+
+                trust_loss = F.kl_div(
+                    attn_weights.log(), target_weights, reduction="batchmean"
+                )
+                total_query_loss = mse_loss + trust_lambda * trust_loss
+
+            query_losses.append(total_query_loss)
 
         L_sum = sum(query_losses)
         L_sum.backward()
@@ -197,6 +216,12 @@ if __name__ == "__main__":
     parser.add_argument("--support-size", type=int, default=10)
     parser.add_argument("--mcs-path", type=str, default="AirQuality_MCS.csv")
     parser.add_argument("--save-path", type=str, default=None)
+    parser.add_argument(
+        "--trust-lambda",
+        type=float,
+        default=0.1,
+        help="Weight for trust auxiliary KL loss (0 to disable)",
+    )
     args = parser.parse_args()
 
     train(
@@ -207,4 +232,5 @@ if __name__ == "__main__":
         use_baseline=args.baseline,
         save_path=args.save_path,
         support_size=args.support_size,
+        trust_lambda=args.trust_lambda,
     )
