@@ -121,6 +121,7 @@ def load_and_preprocess(
     Returns
     -------
     train_tasks_by_type : dict mapping data_type -> list of (sup_X, sup_y, qry_X, qry_y)
+    all_tasks_flat      : flat list of all training tasks across all data types
     test_data     : dict with keys 'X', 'y', 'worker_ids' for NOx test set
     scalers       : dict mapping data_type -> MinMaxScaler
     nox_scaler    : MinMaxScaler fitted on NOx true_value (for inverse transform)
@@ -153,4 +154,8 @@ def load_and_preprocess(
         "worker_ids": test_wids,
     }
 
-    return train_tasks_by_type, test_data, scalers, nox_scaler
+    all_tasks_flat = [
+        task for tasks in train_tasks_by_type.values() for task in tasks
+    ]
+
+    return train_tasks_by_type, all_tasks_flat, test_data, scalers, nox_scaler

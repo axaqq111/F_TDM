@@ -110,7 +110,7 @@ def train(
     save_path: str | None = None,
     support_size: int = 10,
     seed: int = SEED,
-    trust_lambda: float = 0.1,
+    trust_lambda: float = 1.0,
 ) -> nn.Module:
     random.seed(seed)
     np.random.seed(seed)
@@ -121,7 +121,7 @@ def train(
 
     # ── Data ──────────────────────────────────────────────────────────────────
     print("[train] Loading data …")
-    train_tasks_by_type, _, _, _ = load_and_preprocess(
+    train_tasks_by_type, all_tasks_flat, _, _, _ = load_and_preprocess(
         mcs_path=mcs_path,
         support_size=support_size,
         seed=seed,
@@ -139,6 +139,15 @@ def train(
     print(f"[train] Model: {model_name}")
 
     optimizer = optim.SGD(model.parameters(), lr=beta)
+
+    # Separate optimizer for direct attention supervision (Phase 1 only)
+    use_direct_supervision = not use_baseline and trust_lambda > 0
+    if use_direct_supervision:
+        attn_optimizer = optim.SGD(model.parameters(), lr=beta)
+
+    # Phase 1: first 40% of epochs → MAML + direct attention supervision
+    # Phase 2: remaining 60%     → MAML only
+    phase1_end = int(0.4 * epochs)
 
     # ── MAML training loop ────────────────────────────────────────────────────
     for epoch in range(1, epochs + 1):
@@ -164,29 +173,38 @@ def train(
                 total_query_loss = F.mse_loss(qry_pred, qry_y)
             else:
                 qry_pred = adapted_forward_trust(qry_x, adapted_params)
-                mse_loss = F.mse_loss(qry_pred, qry_y)
-
-                # Trust-aware auxiliary loss: encourage attention to assign higher
-                # weight to workers whose values are closer to the ground truth.
-                attn_w0, attn_b0, attn_w1, attn_b1 = adapted_params[:4]
-                h = F.relu(F.linear(qry_x, attn_w0, attn_b0))
-                logits = F.linear(h, attn_w1, attn_b1)
-                attn_weights = F.softmax(logits, dim=-1)  # (batch, 4)
-
-                errors = torch.abs(qry_x - qry_y)  # (batch, 4)
-                target_weights = 1.0 / (1.0 + errors)  # lower error → higher weight
-                target_weights = target_weights / target_weights.sum(dim=-1, keepdim=True)
-
-                trust_loss = F.kl_div(
-                    attn_weights.log(), target_weights, reduction="batchmean"
-                )
-                total_query_loss = mse_loss + trust_lambda * trust_loss
+                total_query_loss = F.mse_loss(qry_pred, qry_y)
 
             query_losses.append(total_query_loss)
 
         L_sum = sum(query_losses)
         L_sum.backward()
         optimizer.step()
+
+        # ── Direct attention supervision (Phase 1 only) ───────────────────────
+        if use_direct_supervision and epoch <= phase1_end:
+            task = random.choice(all_tasks_flat)
+            batch_x, batch_y, _, _ = task
+            batch_x = torch.tensor(batch_x, dtype=torch.float32).to(device)
+            batch_y = torch.tensor(batch_y, dtype=torch.float32).to(device)
+
+            # Sharpen target weights: 1/(1 + 10*error) creates strong contrast
+            errors = torch.abs(batch_x - batch_y)           # (batch, 4)
+            target_weights = 1.0 / (1.0 + 10.0 * errors)   # 10x sharpening
+            target_weights = target_weights / target_weights.sum(dim=-1, keepdim=True)
+
+            pred, attn_weights = model(batch_x)
+
+            # Direct KL loss on attention weights (bypasses MAML second-order grad)
+            attn_loss = F.kl_div(
+                (attn_weights + 1e-8).log(), target_weights, reduction="batchmean"
+            )
+            pred_loss = F.mse_loss(pred, batch_y)
+            direct_loss = pred_loss + trust_lambda * attn_loss
+
+            attn_optimizer.zero_grad()
+            direct_loss.backward()
+            attn_optimizer.step()
 
         if epoch % 500 == 0 or epoch == 1:
             print(f"[train] Epoch {epoch:5d}/{epochs}  outer_loss={L_sum.item():.6f}")
@@ -219,7 +237,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--trust-lambda",
         type=float,
-        default=0.1,
+        default=1.0,
         help="Weight for trust auxiliary KL loss (0 to disable)",
     )
     args = parser.parse_args()
