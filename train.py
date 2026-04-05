@@ -47,9 +47,9 @@ def adapted_forward_trust(
     params order:
       [attn_w0, attn_b0, attn_w1, attn_b1, mlp_w0, mlp_b0, mlp_w1, mlp_b1]
 
-    The MLP now takes concatenated [worker_values, trust_weights] (dim=8)
-    instead of element-wise-weighted values (dim=4), preserving original
-    observations while still incorporating trust signals.
+    The MLP takes weighted input (dim=4, same as baseline): weights * x.
+    Attention parameters are kept frozen in the inner loop; only MLP params
+    are adapted per task.
     """
     attn_w0, attn_b0, attn_w1, attn_b1, mlp_w0, mlp_b0, mlp_w1, mlp_b1 = params
 
@@ -58,11 +58,11 @@ def adapted_forward_trust(
     logits = F.linear(h, attn_w1, attn_b1)
     weights = F.softmax(logits, dim=-1)
 
-    # Concatenate original worker values with trust weights (batch, 8)
-    d_concat = torch.cat([x, weights], dim=-1)
+    # Weighted input: trust-aware combination of worker values (batch, 4)
+    d_weighted = weights * x
 
-    # MLP (input dim = n_workers * 2 = 8)
-    h2 = F.relu(F.linear(d_concat, mlp_w0, mlp_b0))
+    # MLP (input dim = n_workers = 4, same as baseline)
+    h2 = F.relu(F.linear(d_weighted, mlp_w0, mlp_b0))
     pred = F.linear(h2, mlp_w1, mlp_b1)
     return pred
 
@@ -90,17 +90,28 @@ def inner_update(
     alpha: float,
     use_baseline: bool,
 ) -> list[torch.Tensor]:
-    """One gradient step on the support set; returns adapted parameters."""
+    """One gradient step on support set; returns adapted parameters.
+    For trust model, only adapt MLP parameters (not attention)."""
     params = list(model.parameters())
 
     if use_baseline:
         pred = adapted_forward_baseline(sup_x, params)
+        loss = F.mse_loss(pred, sup_y)
+        grads = torch.autograd.grad(loss, params, create_graph=True)
+        adapted = [p - alpha * g for p, g in zip(params, grads)]
     else:
         pred = adapted_forward_trust(sup_x, params)
+        loss = F.mse_loss(pred, sup_y)
+        # Only compute gradients for MLP params; keep attention frozen.
+        # Determine split point from model structure so it stays correct if
+        # AttentionModule ever gains/loses parameters.
+        n_attn = sum(1 for _ in model.attention.parameters())
+        attn_params = params[:n_attn]  # attention: fc1.weight, fc1.bias, fc2.weight, fc2.bias
+        mlp_params = params[n_attn:]   # mlp: linear1.weight, linear1.bias, linear2.weight, linear2.bias
+        grads = torch.autograd.grad(loss, mlp_params, create_graph=True)
+        adapted_mlp = [p - alpha * g for p, g in zip(mlp_params, grads)]
+        adapted = list(attn_params) + adapted_mlp  # attention unchanged, MLP adapted
 
-    loss = F.mse_loss(pred, sup_y)
-    grads = torch.autograd.grad(loss, params, create_graph=True)
-    adapted = [p - alpha * g for p, g in zip(params, grads)]
     return adapted
 
 
@@ -115,7 +126,7 @@ def train(
     save_path: str | None = None,
     support_size: int = 10,
     seed: int = SEED,
-    trust_lambda: float = 10.0,
+    trust_lambda: float = 0.5,
 ) -> nn.Module:
     random.seed(seed)
     np.random.seed(seed)
@@ -230,7 +241,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--trust-lambda",
         type=float,
-        default=10.0,
+        default=0.5,
         help="Weight for trust auxiliary KL loss (0 to disable)",
     )
     args = parser.parse_args()

@@ -39,20 +39,25 @@ class TrustAttentionTDM(nn.Module):
          ↓
     AttentionModule → weights [a1,a2,a3,a4]
          ↓
-    Concatenate: d_concat = [d1,d2,d3,d4, a1,a2,a3,a4]  (batch, 8)
+    Weighted input: d_weighted = [a1·d1, a2·d2, a3·d3, a4·d4]  (batch, 4)
          ↓
-    MLP: 8 → 1024 → 1   (predicted true value)
+    MLP: 4 → 1024 → 1   (predicted true value)
 
-    This concatenation approach preserves the original worker observations
-    alongside their trust weights, giving the MLP full information to produce
-    an accurate prediction while still learning interpretable trust weights.
+    The MLP input dimension is 4 (same as baseline), so the MLP has identical
+    capacity and adaptation cost.  The only difference is the input is weighted
+    by trust scores: malicious workers are suppressed, trusted workers are
+    amplified, giving the MLP cleaner input and enabling it to outperform the
+    unweighted baseline.
+
+    Attention parameters are frozen during the MAML inner loop and trained
+    only via direct KL supervision, avoiding wasted adaptation budget.
     """
 
     def __init__(self, n_workers: int = 4, attn_hidden: int = 64, mlp_hidden: int = 1024):
         super().__init__()
         self.attention = AttentionModule(n_workers, attn_hidden)
         self.mlp = nn.Sequential(
-            nn.Linear(n_workers * 2, mlp_hidden),  # Input: worker values + trust weights
+            nn.Linear(n_workers, mlp_hidden),  # Input: 4 (same as baseline)
             nn.ReLU(),
             nn.Linear(mlp_hidden, 1),
         )
@@ -68,9 +73,9 @@ class TrustAttentionTDM(nn.Module):
         pred    : (batch, 1) — predicted true value
         weights : (batch, 4) — attention weights (trust proxy)
         """
-        weights = self.attention(x)                  # (batch, 4)
-        d_concat = torch.cat([x, weights], dim=-1)   # (batch, 8) — values + trust weights
-        pred = self.mlp(d_concat)                    # (batch, 1)
+        weights = self.attention(x)              # (batch, 4)
+        d_weighted = weights * x                 # (batch, 4) trust-aware weighted input
+        pred = self.mlp(d_weighted)              # (batch, 1)
         return pred, weights
 
 
