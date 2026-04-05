@@ -18,7 +18,7 @@ class AttentionModule(nn.Module):
     Output: attention weights  (batch, 4)  — sum to 1 via softmax
     """
 
-    def __init__(self, n_workers: int = 4, hidden: int = 64):
+    def __init__(self, n_workers: int = 4, hidden: int = 128):
         super().__init__()
         self.fc1 = nn.Linear(n_workers, hidden)
         self.fc2 = nn.Linear(hidden, n_workers)
@@ -41,20 +41,22 @@ class TrustAttentionTDM(nn.Module):
          ↓
     Concatenate: d_concat = [d1,d2,d3,d4, a1,a2,a3,a4]  (batch, 8)
          ↓
-    MLP: 8 → 1024 → 1   (predicted true value)
+    MLP: 8 → 1024 → 256 → 1   (predicted true value)
 
     This concatenation approach preserves the original worker observations
     alongside their trust weights, giving the MLP full information to produce
     an accurate prediction while still learning interpretable trust weights.
     """
 
-    def __init__(self, n_workers: int = 4, attn_hidden: int = 64, mlp_hidden: int = 1024):
+    def __init__(self, n_workers: int = 4, attn_hidden: int = 128, mlp_hidden: int = 1024):
         super().__init__()
         self.attention = AttentionModule(n_workers, attn_hidden)
         self.mlp = nn.Sequential(
-            nn.Linear(n_workers * 2, mlp_hidden),  # Input: worker values + trust weights
+            nn.Linear(n_workers * 2, mlp_hidden),  # 8 → 1024
             nn.ReLU(),
-            nn.Linear(mlp_hidden, 1),
+            nn.Linear(mlp_hidden, 256),             # 1024 → 256
+            nn.ReLU(),
+            nn.Linear(256, 1),                      # 256 → 1
         )
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
