@@ -23,7 +23,7 @@ Output: trained truth discovery model
 9:      Obtain query dataset D_query = {D_W, D_U} from T_i
 10:     Evaluate L_i with weights θ'_i on D_query
 11:   end for
-12:   Evaluate L_sum = Σ L_i(f_{θ'_i})
+12:   Evaluate L_sum = Σ L_i
 13:   Update θ ← θ − β ∇_θ L_sum
 14: end while
 
@@ -43,6 +43,7 @@ parameters.  This is memory-efficient and matches the single-step inner
 loop described in the paper.
 """
 
+import json
 import random
 
 import numpy as np
@@ -50,7 +51,8 @@ import torch
 import torch.nn as nn
 
 from data_preprocessing import preprocess
-from model import TruthDiscoveryMLP
+from model import TruthDiscoveryMLP, TrustAwareTruthDiscoveryMLP
+from trust_manager import DynamicTrustManager
 
 # ── Hyper-parameters (Table II) ───────────────────────────────────────────────
 ALPHA        = 0.0005   # inner-loop learning rate
@@ -81,17 +83,29 @@ def mse_loss(pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
 
 def adapted_forward(model: nn.Module,
                     x: torch.Tensor,
-                    params: list) -> torch.Tensor:
+                    params: list,
+                    trust_weights: torch.Tensor = None) -> torch.Tensor:
     """
     Run a forward pass of the 3-layer MLP using the supplied *params* list
     instead of model.parameters().  This allows the outer loop to
     differentiate through the inner-loop update.
 
+    For TrustAwareTruthDiscoveryMLP the trust fusion is applied to x before
+    the linear layers (trust_weights are not differentiated).
+
     The model architecture is:
-        Linear(4 → 1024) → ReLU → Linear(1024 → 1)
+        Linear(input -> hidden) -> ReLU -> Linear(hidden -> 1)
 
     params order: [w0, b0, w1, b1]
     """
+    # Apply trust fusion to x (no gradient needed for trust_weights)
+    if trust_weights is not None:
+        fusion = getattr(model, "fusion_mode", None)
+        if fusion == "weighted":
+            x = x * trust_weights
+        elif fusion == "concat":
+            x = torch.cat([x, trust_weights], dim=-1)
+
     w0, b0, w1, b1 = params
     x = torch.relu(x @ w0.T + b0)
     x = x @ w1.T + b1
@@ -103,36 +117,38 @@ def adapted_forward(model: nn.Module,
 def inner_update(model: nn.Module,
                  support_W: torch.Tensor,
                  support_U: torch.Tensor,
-                 alpha: float) -> list:
+                 alpha: float,
+                 trust_weights: torch.Tensor = None) -> list:
     """
     Perform a single gradient-descent step on the support set and return
-    the adapted parameters θ'_i.
+    the adapted parameters theta'_i.
 
     Parameters
     ----------
-    model      : the current meta-model with parameters θ
-    support_W  : D_W for the support set, shape (K_s, 4)
-    support_U  : D_U for the support set, shape (K_s,)
-    alpha      : inner-loop learning rate
+    model         : the current meta-model with parameters theta
+    support_W     : D_W for the support set, shape (K_s, 4)
+    support_U     : D_U for the support set, shape (K_s,)
+    alpha         : inner-loop learning rate
+    trust_weights : optional trust weight tensor, shape (K_s, 4)
 
     Returns
     -------
     adapted_params : list of updated parameter tensors (still in graph)
     """
-    # Line 5: D_P = f_θ(D_W)
+    # Line 5: D_P = f_theta(D_W)
     params = list(model.parameters())
 
     # Forward pass on support set using current parameters
-    pred = adapted_forward(model, support_W, params)
+    pred = adapted_forward(model, support_W, params, trust_weights)
 
     # Line 6: L_support_i  (Equation 1)
     loss = mse_loss(pred, support_U)
 
-    # Line 7: ∇_θ L_support_i
+    # Line 7: grad_theta L_support_i
     # create_graph=True keeps the second-order graph for outer gradient
     grads = torch.autograd.grad(loss, params, create_graph=True)
 
-    # Line 8: θ'_i = θ - α * ∇_θ L_support_i
+    # Line 8: theta'_i = theta - alpha * grad_theta L_support_i
     adapted_params = [p - alpha * g for p, g in zip(params, grads)]
     return adapted_params
 
@@ -143,11 +159,27 @@ def train(csv_path: str = "AirQualityUCI.csv",
           alpha: float = ALPHA,
           beta:  float = BETA,
           epochs: int  = EPOCHS,
-          model_save: str = MODEL_SAVE):
+          model_save: str = MODEL_SAVE,
+          use_trust: bool = True,
+          fusion_mode: str = "concat",
+          decay_factor: float = 0.95):
     """
     Execute Algorithm 1: MAML-based meta-learning training.
 
-    Returns the trained TruthDiscoveryMLP model.
+    Parameters
+    ----------
+    csv_path     : path to AirQualityUCI.csv
+    alpha        : inner-loop learning rate
+    beta         : outer-loop learning rate
+    epochs       : number of training epochs
+    model_save   : file path to save the trained model weights
+    use_trust    : whether to use dynamic worker trust (default True)
+    fusion_mode  : 'concat' (default) or 'weighted' trust fusion
+    decay_factor : EMA decay factor lambda for DynamicTrustManager
+
+    Returns
+    -------
+    The trained model (TrustAwareTruthDiscoveryMLP or TruthDiscoveryMLP).
     """
     # ── Preprocessing ──────────────────────────────────────────────────────
     print("Loading and preprocessing data …")
@@ -163,12 +195,32 @@ def train(csv_path: str = "AirQualityUCI.csv",
     print(f"Tasks per type: {total_tasks}")
 
     # ── Model initialisation (Line 1) ───────────────────────────────────────
-    model = TruthDiscoveryMLP(input_size=INPUT_SIZE, hidden_size=HIDDEN_SIZE)
-    # Line 13: θ ← θ − β∇_θ L_sum  →  standard SGD, lr = β
+    if use_trust:
+        model = TrustAwareTruthDiscoveryMLP(
+            input_size=INPUT_SIZE,
+            hidden_size=HIDDEN_SIZE,
+            fusion_mode=fusion_mode,
+        )
+        # One DynamicTrustManager per training data type
+        trust_managers = {
+            col: DynamicTrustManager(n_workers=INPUT_SIZE,
+                                     decay_factor=decay_factor)
+            for col in col_names
+        }
+    else:
+        model = TruthDiscoveryMLP(input_size=INPUT_SIZE,
+                                  hidden_size=HIDDEN_SIZE)
+        trust_managers = {}
+
+    # Line 13: theta <- theta - beta * grad L_sum  ->  standard SGD, lr = beta
     outer_optimizer = torch.optim.SGD(model.parameters(), lr=beta)
 
     print(f"\nStarting training for {epochs} epochs …")
     print(f"  α (inner lr) = {alpha},  β (outer lr) = {beta}")
+    if use_trust:
+        print(f"  Trust mode: ON  (fusion={fusion_mode}, λ={decay_factor})")
+    else:
+        print("  Trust mode: OFF (baseline)")
     print("-" * 60)
 
     # ── Outer loop (Line 2: while not reach epochs) ─────────────────────────
@@ -192,18 +244,42 @@ def train(csv_path: str = "AirQualityUCI.csv",
             qry_W_t = to_tensor(qry_W)
             qry_U_t = to_tensor(qry_U)
 
-            # Line 4-8: inner update → θ'_i
-            adapted_params = inner_update(model, sup_W_t, sup_U_t, alpha)
+            # Build trust weight tensors (no grad)
+            if use_trust:
+                tm      = trust_managers[col]
+                weights = tm.get_weights()          # shape (4,)
+                sup_trust_t = torch.tensor(
+                    np.tile(weights, (len(sup_W), 1)),
+                    dtype=torch.float32,
+                    requires_grad=False,
+                )
+                qry_trust_t = torch.tensor(
+                    np.tile(weights, (len(qry_W), 1)),
+                    dtype=torch.float32,
+                    requires_grad=False,
+                )
+            else:
+                sup_trust_t = None
+                qry_trust_t = None
 
-            # Line 9-10: evaluate on query set with θ'_i
-            qry_pred = adapted_forward(model, qry_W_t, adapted_params)
+            # Line 4-8: inner update -> theta'_i
+            adapted_params = inner_update(model, sup_W_t, sup_U_t, alpha,
+                                          trust_weights=sup_trust_t)
+
+            # Line 9-10: evaluate on query set with theta'_i
+            qry_pred = adapted_forward(model, qry_W_t, adapted_params,
+                                       trust_weights=qry_trust_t)
             L_i = mse_loss(qry_pred, qry_U_t)
             query_losses.append(L_i)
 
-        # Line 12: L_sum = Σ L_i
+            # Update trust scores after this task (support set as reference)
+            if use_trust:
+                tm.batch_update(sup_W, sup_U)
+
+        # Line 12: L_sum = sum L_i
         L_sum = sum(query_losses)
 
-        # Line 13: θ ← θ - β * ∇_θ L_sum  (via SGD)
+        # Line 13: theta <- theta - beta * grad_theta L_sum  (via SGD)
         L_sum.backward()
         outer_optimizer.step()
 
@@ -214,9 +290,27 @@ def train(csv_path: str = "AirQualityUCI.csv",
     print("-" * 60)
     print("Training complete.")
 
-    # Save the trained model
+    # Save the trained model weights
     torch.save(model.state_dict(), model_save)
     print(f"Model saved to '{model_save}'.")
+
+    # Save model config and final trust state alongside weights
+    config = {
+        "use_trust":    use_trust,
+        "fusion_mode":  fusion_mode if use_trust else None,
+        "decay_factor": decay_factor if use_trust else None,
+        "input_size":   INPUT_SIZE,
+        "hidden_size":  HIDDEN_SIZE,
+    }
+    if use_trust:
+        config["trust_scores"] = {
+            col: tm.state_dict() for col, tm in trust_managers.items()
+        }
+
+    config_path = model_save.replace(".pth", "_config.json")
+    with open(config_path, "w") as f:
+        json.dump(config, f, indent=2)
+    print(f"Config saved to '{config_path}'.")
 
     return model
 

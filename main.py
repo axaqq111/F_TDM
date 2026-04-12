@@ -11,6 +11,8 @@ Usage
 -----
     python main.py [--csv CSV_PATH] [--epochs N] [--alpha A] [--beta B]
                    [--skip-train] [--model MODEL_PATH]
+                   [--no-trust] [--fusion-mode {concat,weighted}]
+                   [--decay-factor LAMBDA]
 """
 
 import argparse
@@ -38,6 +40,26 @@ def parse_args():
                         help="Skip training and load an existing model for evaluation")
     parser.add_argument("--fine-tune-steps", type=int, default=10,
                         help="Gradient steps during few-shot fine-tuning  (default: 10)")
+
+    # ── Trust-related arguments ────────────────────────────────────────────
+    trust_group = parser.add_mutually_exclusive_group()
+    trust_group.add_argument(
+        "--use-trust",  dest="use_trust", action="store_true", default=True,
+        help="Enable dynamic worker trust evaluation (default: enabled)",
+    )
+    trust_group.add_argument(
+        "--no-trust",   dest="use_trust", action="store_false",
+        help="Disable trust evaluation for baseline comparison",
+    )
+    parser.add_argument(
+        "--fusion-mode", choices=["concat", "weighted"], default="concat",
+        help="Trust fusion mode: 'concat' (default) or 'weighted'",
+    )
+    parser.add_argument(
+        "--decay-factor", type=float, default=0.95,
+        help="EMA time-decay factor λ for DynamicTrustManager (default: 0.95)",
+    )
+
     return parser.parse_args()
 
 
@@ -49,16 +71,26 @@ def main():
     print("║  IEEE TMC, Vol. 24, No. 4, April 2025                    ║")
     print("╚══════════════════════════════════════════════════════════╝\n")
 
+    if args.use_trust:
+        print(f"  Dynamic trust: ON  "
+              f"(fusion={args.fusion_mode}, λ={args.decay_factor})")
+    else:
+        print("  Dynamic trust: OFF (baseline mode)")
+    print()
+
     # ── Step 1: Training ───────────────────────────────────────────────────
     if not args.skip_train:
         print("▶ Phase 1 – Meta-learning training on 6 data types")
         print("-" * 60)
         train(
-            csv_path   = args.csv,
-            alpha      = args.alpha,
-            beta       = args.beta,
-            epochs     = args.epochs,
-            model_save = args.model,
+            csv_path     = args.csv,
+            alpha        = args.alpha,
+            beta         = args.beta,
+            epochs       = args.epochs,
+            model_save   = args.model,
+            use_trust    = args.use_trust,
+            fusion_mode  = args.fusion_mode,
+            decay_factor = args.decay_factor,
         )
         print()
     else:
@@ -74,6 +106,9 @@ def main():
         few_shot_k      = FEW_SHOT_K,
         test_multiplier = TEST_MULTIPLIER,
         fine_tune_steps = args.fine_tune_steps,
+        use_trust       = args.use_trust    if not args.skip_train else None,
+        fusion_mode     = args.fusion_mode  if not args.skip_train else None,
+        decay_factor    = args.decay_factor if not args.skip_train else None,
     )
 
     print("\n✔ Experiment complete.")
