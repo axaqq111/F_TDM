@@ -23,7 +23,7 @@ Output: trained truth discovery model
 9:      Obtain query dataset D_query = {D_W, D_U} from T_i
 10:     Evaluate L_i with weights θ'_i on D_query
 11:   end for
-12:   Evaluate L_sum = Σ L_i
+12:   Evaluate L_sum = Σ L_i(f_{θ'_i})
 13:   Update θ ← θ − β ∇_θ L_sum
 14: end while
 
